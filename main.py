@@ -1,154 +1,234 @@
-"""Poll active window, control music, and update floating UI."""
+"""main.py — Zorby Qt UI entry point.
+
+Wires ZorbyEngine into the PyQt5 floating orb UI.
+All monitoring logic lives in engine.py — main.py only handles:
+  - Qt app lifecycle
+  - Translating engine events → UI updates and music changes
+"""
 
 from dataclasses import dataclass, field
+
 import ai_messages
 import music
-import tracker
+from engine import ZorbyEngine, AppStatus, MODE_WORK, MODE_ENTERTAINMENT, MODE_GAME
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import QApplication
 from stats import FocusStats
 from ui import FloatingOrbWindow
 
-POLL_SECONDS = 3
+# ── tunables ──────────────────────────────────────────────────────────────
+POLL_SECONDS       = 3
 AWAY_GRACE_SECONDS = 5 * 60
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Focus session state (UI / work-timer — separate from engine internals)
+# ══════════════════════════════════════════════════════════════════════════
+
 @dataclass
-class AppState:
-    music_on: bool = False
+class SessionState:
+    """Tracks work-session progress for the UI timer, music and achievements."""
+    # Activity confirmation (requires two consecutive identical ticks)
+    previous_mode:   str | None = None
+    confirmed_mode:  str | None = None
+
+    # Music
+    music_on:   bool      = False
     music_mode: str | None = None
-    previous_activity: str | None = None
-    confirmed_activity: str | None = None
+
+    # Work timer
     session_active: bool = False
-    away_seconds: int = 0
-    work_seconds: int = 0
-    break_reminded: bool = False
+    away_seconds:   int  = 0
+    work_seconds:   int  = 0
+
+    # Reminders and achievements
+    break_reminded:          bool = False
     achievement_30m_unlocked: bool = False
-    achievement_1h_unlocked: bool = False
+    achievement_1h_unlocked:  bool = False
     work_message_thresholds_triggered: set[int] = field(default_factory=set)
+
+    # Today's cumulative stats
     stats: FocusStats = field(default_factory=FocusStats)
 
 
-def get_confirmed_activity(state: AppState, raw_activity: str) -> str | None:
-    if state.previous_activity is not None and raw_activity == state.previous_activity:
-        state.confirmed_activity = raw_activity
-    state.previous_activity = raw_activity
-    return state.confirmed_activity
+# ══════════════════════════════════════════════════════════════════════════
+# Activity confirmation
+# ══════════════════════════════════════════════════════════════════════════
+
+def _confirm_mode(session: SessionState, raw_mode: str) -> str | None:
+    """Return mode only after two consecutive identical observations."""
+    if session.previous_mode == raw_mode:
+        session.confirmed_mode = raw_mode
+    session.previous_mode = raw_mode
+    return session.confirmed_mode
 
 
-def process_work_tick(state: AppState) -> None:
-    if not state.session_active:
-        state.session_active = True
-        state.stats.register_session_start()
+# ══════════════════════════════════════════════════════════════════════════
+# Work session processing
+# ══════════════════════════════════════════════════════════════════════════
+
+def _process_work_tick(session: SessionState) -> None:
+    if not session.session_active:
+        session.session_active = True
+        session.stats.register_session_start()
         print("Focus mode started")
 
-    state.away_seconds = 0
-    state.work_seconds += POLL_SECONDS
-    state.stats.add_focus_seconds(POLL_SECONDS, state.work_seconds)
-    print(f"Work session: {state.work_seconds // 60} minutes")
+    session.away_seconds  = 0
+    session.work_seconds += POLL_SECONDS
+    session.stats.add_focus_seconds(POLL_SECONDS, session.work_seconds)
+    print(f"Work session: {session.work_seconds // 60} minutes")
 
-    if state.work_seconds >= 30 * 60 and not state.achievement_30m_unlocked:
+    if session.work_seconds >= 30 * 60 and not session.achievement_30m_unlocked:
         print("Achievement unlocked: 30 Min Focus Streak 🔥")
-        state.achievement_30m_unlocked = True
-    if state.work_seconds >= 60 * 60 and not state.achievement_1h_unlocked:
+        session.achievement_30m_unlocked = True
+    if session.work_seconds >= 60 * 60 and not session.achievement_1h_unlocked:
         print("Achievement unlocked: 1 Hour Focus Streak 🔥")
-        state.achievement_1h_unlocked = True
-    if state.work_seconds > 50 * 60 and not state.break_reminded:
-        print("You've been working for a long time. Take a short break.")
-        state.break_reminded = True
+        session.achievement_1h_unlocked = True
+    if session.work_seconds > 50 * 60 and not session.break_reminded:
+        print("You've been working a long time — take a break.")
+        session.break_reminded = True
 
 
-def process_away_tick(state: AppState) -> None:
-    if not state.session_active:
+def _process_away_tick(session: SessionState) -> None:
+    if not session.session_active:
         return
-    state.away_seconds += POLL_SECONDS
-    if state.away_seconds < AWAY_GRACE_SECONDS:
+    session.away_seconds += POLL_SECONDS
+    if session.away_seconds < AWAY_GRACE_SECONDS:
         return
-
     print("Focus session ended")
-    state.stats.register_session_end(state.work_seconds)
-    state.session_active = False
-    state.away_seconds = 0
-    state.work_seconds = 0
-    state.break_reminded = False
-    state.work_message_thresholds_triggered.clear()
+    session.stats.register_session_end(session.work_seconds)
+    session.session_active = False
+    session.away_seconds   = 0
+    session.work_seconds   = 0
+    session.break_reminded = False
+    session.work_message_thresholds_triggered.clear()
 
 
-def update_music(state: AppState, confirmed_activity: str | None) -> None:
-    if confirmed_activity == "work":
-        target_mode = "focus"
-    elif confirmed_activity in ("entertainment", "idle"):
-        target_mode = "calm"
+# ══════════════════════════════════════════════════════════════════════════
+# Music
+# ══════════════════════════════════════════════════════════════════════════
+
+def _update_music(session: SessionState, confirmed_mode: str | None) -> None:
+    if confirmed_mode == MODE_WORK:
+        target = "focus"
+    elif confirmed_mode in (MODE_ENTERTAINMENT, "idle"):
+        target = "calm"
     else:
-        target_mode = None
+        target = None
 
-    if target_mode is None:
-        if state.music_on:
+    if target is None:
+        if session.music_on:
             music.stop_music()
-            state.music_on = False
-            state.music_mode = None
+            session.music_on   = False
+            session.music_mode = None
         return
 
-    if state.music_on and state.music_mode == target_mode:
+    if session.music_on and session.music_mode == target:
         return
 
-    state.music_on = music.play_music(target_mode)
-    state.music_mode = target_mode if state.music_on else None
+    session.music_on   = music.play_music(target)
+    session.music_mode = target if session.music_on else None
 
 
-def resolve_message(state: AppState, ui_state: str, focus_minutes: int) -> str:
-    if state.confirmed_activity == "work":
-        milestone_message = ai_messages.get_work_milestone_message(
-            focus_minutes, state.work_message_thresholds_triggered
+# ══════════════════════════════════════════════════════════════════════════
+# UI update
+# ══════════════════════════════════════════════════════════════════════════
+
+def _resolve_message(session: SessionState, ui_mode: str, focus_minutes: int) -> str:
+    if session.confirmed_mode == MODE_WORK:
+        msg = ai_messages.get_work_milestone_message(
+            focus_minutes, session.work_message_thresholds_triggered
         )
-        if milestone_message:
-            return milestone_message
-    return ai_messages.generate_message(ui_state, focus_minutes)
+        if msg:
+            return msg
+    return ai_messages.generate_message(ui_mode, focus_minutes)
 
 
-def update_ui(window: FloatingOrbWindow, state: AppState) -> None:
-    focus_minutes = state.work_seconds // 60
-    ui_state = state.confirmed_activity or "idle"
+def _update_ui(window: FloatingOrbWindow, session: SessionState) -> None:
+    focus_minutes = session.work_seconds // 60
+    ui_mode       = session.confirmed_mode or "idle"
 
-    window.set_mode(ui_state)
+    window.set_mode(ui_mode)
     window.set_focus_minutes(focus_minutes)
-    window.set_message(resolve_message(state, ui_state, focus_minutes))
-    window.set_break_alert(state.session_active and state.break_reminded)
+    window.set_message(_resolve_message(session, ui_mode, focus_minutes))
+    window.set_break_alert(session.session_active and session.break_reminded)
     window.set_stats(
-        state.stats.today_text(),
-        state.stats.best_text(),
-        state.stats.session_count,
+        session.stats.today_text(),
+        session.stats.best_text(),
+        session.stats.session_count,
     )
 
 
-def tick(window: FloatingOrbWindow, state: AppState) -> None:
-    title = tracker.get_active_window()
-    activity = tracker.classify_activity(title)
-    print(activity)
-    confirmed_activity = get_confirmed_activity(state, activity)
+# ══════════════════════════════════════════════════════════════════════════
+# Qt tick — driven by QTimer, reads latest engine status
+# ══════════════════════════════════════════════════════════════════════════
 
-    if confirmed_activity == "work":
-        process_work_tick(state)
+def _tick(engine: ZorbyEngine, window: FloatingOrbWindow, session: SessionState) -> None:
+    status = engine.status
+    if status is None:
+        return   # engine hasn't produced a tick yet
+
+    print(status.mode)
+
+    # Skip music / UI while gaming — engine already hides the window
+    if status.should_hide:
+        return
+
+    confirmed = _confirm_mode(session, status.mode)
+
+    if confirmed == MODE_WORK:
+        _process_work_tick(session)
     else:
-        process_away_tick(state)
+        _process_away_tick(session)
 
-    update_music(state, confirmed_activity)
-    update_ui(window, state)
+    _update_music(session, confirmed)
+    _update_ui(window, session)
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# Engine ↔ Qt bridge (runs on Qt main thread via Qt callbacks)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _make_game_enter_handler(window: FloatingOrbWindow):
+    def _on_enter():
+        window.hide()
+    return _on_enter
+
+
+def _make_game_exit_handler(window: FloatingOrbWindow):
+    def _on_exit():
+        window.show()
+        window.raise_()
+    return _on_exit
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════════════════════════════════
 
 def main() -> int:
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication([])
-    window = FloatingOrbWindow()
-    state = AppState()
+
+    window  = FloatingOrbWindow()
+    session = SessionState()
+
+    # Wire engine callbacks → Qt window visibility
+    engine = ZorbyEngine(interval=POLL_SECONDS, auto_pause_media=True)
+    engine.on_game_enter(_make_game_enter_handler(window))
+    engine.on_game_exit(_make_game_exit_handler(window))
+
     window.show()
     window.raise_()
+    engine.start()
 
+    # QTimer drives the UI tick (reads engine.status snapshot)
     timer = QTimer()
-    timer.timeout.connect(lambda: tick(window, state))
+    timer.timeout.connect(lambda: _tick(engine, window, session))
     timer.start(POLL_SECONDS * 1000)
-    tick(window, state)
+
+    app.aboutToQuit.connect(engine.stop)
     return app.exec_()
 
 
