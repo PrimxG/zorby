@@ -376,7 +376,6 @@ class FloatingOrbWindow(QWidget):
             return
         if kind == "release":
             if self._drag_started and not self._dragging:
-                print("Orb clicked")
                 self.toggle_orb()
             else:
                 self.move(self._clamp_pos(self.pos(), self.size(), padding=0))

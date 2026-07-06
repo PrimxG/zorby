@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 # ── leaf-level subsystems (no cross-dependencies) ─────────────────────────
-from audio         import is_audio_playing
+from audio         import is_audio_playing  # used in _tick only
 from classifier    import classify_app, CATEGORY_GAME, CATEGORY_WORK, CATEGORY_ENTERTAINMENT
 from config        import get_work_keywords, get_entertainment_keywords, get_games
 from fullscreen    import is_fullscreen, _get_screen_resolution
@@ -153,6 +153,11 @@ class ZorbyEngine:
     def status(self) -> AppStatus | None:
         """Most recent AppStatus snapshot, or None before first tick."""
         return self._state.last_status
+
+    @property
+    def running(self) -> bool:
+        """True while the background monitoring thread is active."""
+        return self._running
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -269,7 +274,7 @@ class ZorbyEngine:
 
         # ── Media pause: fire on the FIRST tick only (no spam) ─────────────
         if not self._state.media_paused and self.auto_pause_media:
-            if is_audio_playing():
+            if status.audio_playing:   # use the value already read in _tick
                 ok = pause_media()
                 if ok:
                     self._state.media_paused    = True

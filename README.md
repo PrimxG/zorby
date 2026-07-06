@@ -91,7 +91,7 @@ Zorby's core is **ZorbyEngine** — a clean event-driven system that separates c
 | **engine.py** | Central `ZorbyEngine`: monitors window, detects fullscreen/games, triggers callbacks |
 | **classifier.py** | Classifies apps by keyword matching (Work/Entertainment/Game) |
 | **audio.py** | Real-time audio detection via Windows WASAPI peak metering |
-| **media_watcher.py** | Background thread that auto-pauses media on audio detection |
+| **media_watcher.py** | ⚠️ **Standalone CLI tool only** — not imported by main.py/engine.py; run independently with `python media_watcher.py` |
 | **media_control.py** | Low-level media pause/play control |
 | **hotkey.py** | Global hotkey registration for manual pause toggle |
 | **fullscreen.py** | Detects fullscreen windows, screen resolution |
@@ -111,7 +111,7 @@ Zorby's core is **ZorbyEngine** — a clean event-driven system that separates c
 * **pygame** – music playback
 * **psutil & pygetwindow** – process & window tracking
 * **pycaw** – Windows Core Audio API (WASAPI) for audio detection
-* **pynput** – global hotkey registration
+* **keyboard** – global hotkey registration (Ctrl+Shift+Z)
 
 ---
 
@@ -124,7 +124,7 @@ Zorby's core is **ZorbyEngine** — a clean event-driven system that separates c
 ### Installation
 
 ```bash
-pip install pyqt5 pygame psutil pygetwindow pycaw pynput
+pip install pyqt5 pygame psutil pygetwindow pycaw keyboard
 ```
 
 ### Running Zorby

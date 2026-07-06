@@ -5,13 +5,41 @@ Public API
 is_fullscreen()          -> bool   Detects if the foreground window covers the screen.
 is_gaming_session()      -> bool   True when the app is a Game or the window is fullscreen.
 get_fullscreen_app_name()-> str    Title of the fullscreen window, or "" if none.
+
+Detection strategy (is_fullscreen)
+-----------------------------------
+A window is classified as *true* fullscreen only when **both** conditions hold:
+
+  1. Style flags: the window must NOT carry WS_CAPTION or WS_THICKFRAME.
+     Ordinary maximized windows (VS Code, Chrome, File Explorer …) keep those
+     flags; borderless fullscreen apps drop them entirely.
+
+  2. Geometry: the window's bounding rect must exactly match the *monitor it
+     lives on* (via MonitorFromWindow + GetMonitorInfo), not just the primary
+     screen, so fullscreen apps on secondary monitors are detected correctly.
 """
 
 import ctypes
 import ctypes.wintypes
 import win32gui
+import win32con
+import win32api
 
 from classifier import CATEGORY_GAME, classify_app
+
+
+# ---------------------------------------------------------------------------
+# Win32 constants used for style-flag inspection
+# ---------------------------------------------------------------------------
+
+# Window styles that are present on ordinary maximized windows but absent on
+# true borderless-fullscreen windows.
+_WS_CAPTION    = win32con.WS_CAPTION      # title bar (includes WS_BORDER)
+_WS_THICKFRAME = win32con.WS_THICKFRAME   # resizable border
+_GWL_STYLE     = win32con.GWL_STYLE
+
+# MonitorFromWindow flags
+_MONITOR_DEFAULTTONEAREST = 0x00000002
 
 
 # ---------------------------------------------------------------------------
@@ -43,37 +71,91 @@ def _get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
 
 
 # ---------------------------------------------------------------------------
+# Internal: per-monitor rect via MonitorFromWindow + GetMonitorInfo
+# ---------------------------------------------------------------------------
+
+def _get_monitor_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Return the bounding rect of the monitor that contains *hwnd*.
+
+    Uses MonitorFromWindow so the result is correct for any monitor in a
+    multi-monitor setup, not just the primary screen.
+
+    Returns (left, top, right, bottom) in virtual-desktop coordinates, or
+    None on failure.
+    """
+    try:
+        hmonitor = win32api.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+        if not hmonitor:
+            return None
+        info = win32api.GetMonitorInfo(hmonitor)
+        # 'Monitor' is the full monitor rect; 'Work' excludes the taskbar.
+        # For fullscreen detection we want the *full* monitor rect.
+        mon_rect = info["Monitor"]  # (left, top, right, bottom)
+        return tuple(mon_rect)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Internal: window-style inspection
+# ---------------------------------------------------------------------------
+
+def _has_window_chrome(hwnd: int) -> bool:
+    """Return True if *hwnd* still has a title-bar or resizable border.
+
+    Maximized windows (VS Code, Chrome, File Explorer …) always keep
+    WS_CAPTION and WS_THICKFRAME; true borderless fullscreen apps drop them.
+    """
+    try:
+        style = win32gui.GetWindowLong(hwnd, _GWL_STYLE)
+        return bool(style & (_WS_CAPTION | _WS_THICKFRAME))
+    except Exception:
+        # If we can't read the style, assume it has chrome (safe default).
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Public: fullscreen detection
 # ---------------------------------------------------------------------------
 
 def is_fullscreen() -> bool:
-    """Detect whether the current foreground window covers the entire screen.
+    """Detect whether the current foreground window is true borderless fullscreen.
 
-    Strategy: compare the window's bounding rect (via win32gui.GetWindowRect)
-    against the primary monitor's resolution (via ctypes system metrics).
-    A window is considered fullscreen when its rect exactly matches the screen
-    dimensions starting from (0, 0).
+    Strategy (both conditions must hold):
+
+      1. **Style flags** — the window must NOT carry WS_CAPTION or WS_THICKFRAME.
+         Ordinary maximized windows keep these flags; borderless fullscreen apps
+         (games, video players, slide-show renderers …) drop them entirely.
+
+      2. **Geometry** — the window's bounding rect must exactly match the rect of
+         the monitor it lives on (via MonitorFromWindow + GetMonitorInfo).  This
+         works correctly on every monitor in a multi-monitor setup, not just the
+         primary screen.
 
     Returns:
-        True  — the foreground window spans the full screen.
-        False — no foreground window, or the window is smaller than the screen.
+        True  — foreground window is true borderless fullscreen.
+        False — no foreground window, window has title-bar/border chrome, or the
+                window does not cover its monitor completely.
     """
     try:
         hwnd = win32gui.GetForegroundWindow()
         if not hwnd:
             return False
 
-        rect = _get_window_rect(hwnd)
-        if rect is None:
+        # --- 1. Style check: bail out if the window still has normal chrome ---
+        if _has_window_chrome(hwnd):
             return False
 
-        left, top, right, bottom = rect
-        screen_w, screen_h = _get_screen_resolution()
+        # --- 2. Geometry check against the window's actual monitor -----------
+        win_rect = _get_window_rect(hwnd)
+        if win_rect is None:
+            return False
 
-        win_w = right  - left
-        win_h = bottom - top
+        mon_rect = _get_monitor_rect(hwnd)
+        if mon_rect is None:
+            return False
 
-        return left == 0 and top == 0 and win_w == screen_w and win_h == screen_h
+        return win_rect == mon_rect
 
     except Exception:
         return False

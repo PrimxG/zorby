@@ -1,4 +1,17 @@
-"""media_watcher.py — Auto-pause media when playback is detected.
+"""media_watcher.py — Standalone CLI tool: auto-pause media on audio detection.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  STANDALONE TOOL — NOT part of the main Zorby pipeline                      ║
+║                                                                              ║
+║  This file is NOT imported by main.py, zorby.py, or engine.py.              ║
+║  ZorbyEngine (engine.py) already handles auto-pause internally via its       ║
+║  auto_pause_media flag.  This module is a separate, optional CLI utility     ║
+║  that can be run independently without launching the full Zorby UI:          ║
+║                                                                              ║
+║      python media_watcher.py [--interval N] [--threshold N]                 ║
+║                                                                              ║
+║  Do NOT wire it into main.py/zorby.py — that would double-pause media.      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
 Runs a lightweight background loop that:
   1. Polls the system audio peak meter every `interval` seconds.

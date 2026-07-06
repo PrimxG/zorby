@@ -6,13 +6,15 @@ library, so it never blocks the main process or the Qt event loop.
 
 Public API
 ----------
-register_hotkeys()   Call once at startup to activate all hotkeys.
-unregister_hotkeys() Call on shutdown to cleanly remove all hotkeys.
+register_hotkeys(on_activate)  Call once at startup to activate all hotkeys.
+unregister_hotkeys()           Call on shutdown to cleanly remove all hotkeys.
 
 Adding new hotkeys
 ------------------
 Drop a new entry into _HOTKEYS below — no other changes needed.
 """
+
+from typing import Callable
 
 import keyboard
 
@@ -31,19 +33,46 @@ _HOTKEYS: list[tuple[str, object]] = [
 ]
 
 # Tracks registered hotkey handles so they can be cleanly removed.
-_handles: list[keyboard.KeyboardEvent] = []
+#
+# Type note: keyboard.add_hotkey() returns a zero-argument closure (remove_)
+# that the library uses internally as a removal token.  The `keyboard` package
+# ships no type stubs and does not export a named type for this handle.
+# Inspecting the source confirms the return type is always `Callable[[], None]`
+# — passed directly to keyboard.remove_hotkey() for cleanup.
+_handles: list[Callable[[], None]] = []
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def register_hotkeys() -> None:
-    """Register all global hotkeys. Safe to call multiple times."""
+def register_hotkeys(on_activate=None) -> None:
+    """Register all global hotkeys. Safe to call multiple times.
+
+    Args:
+        on_activate: Optional zero-argument callable to invoke when
+                     Ctrl+Shift+Z is pressed.  If omitted the default
+                     action is a console print (useful for standalone
+                     testing via ``python hotkey.py``).
+
+                     IMPORTANT: the ``keyboard`` library fires this
+                     callback on its own background thread.  If the
+                     callback touches Qt widgets it MUST go through a
+                     Qt signal/slot (queued connection) rather than
+                     calling widget methods directly.
+    """
     if _handles:
         return  # already registered
 
-    for combo, callback in _HOTKEYS:
+    # Build the hotkey table, substituting the caller-supplied action.
+    hotkeys = list(_HOTKEYS)
+    if on_activate is not None:
+        hotkeys = [
+            (combo, on_activate if combo == "ctrl+shift+z" else cb)
+            for combo, cb in hotkeys
+        ]
+
+    for combo, callback in hotkeys:
         handle = keyboard.add_hotkey(combo, callback, suppress=False)
         _handles.append(handle)
         print(f"[hotkey] Registered: {combo}")
@@ -67,7 +96,7 @@ def unregister_hotkeys() -> None:
 if __name__ == "__main__":
     import time
 
-    register_hotkeys()
+    register_hotkeys()   # uses default print action
     print("Listening for Ctrl+Shift+Z … (Ctrl+C to quit)")
 
     try:

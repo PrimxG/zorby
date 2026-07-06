@@ -21,23 +21,6 @@ def _ensure_mixer() -> None:
         pygame.mixer.init()
 
 
-def get_random_track(mode: str) -> str | None:
-    """Return random .mp3 path for focus/calm mode."""
-    folder = MODE_DIRS.get(mode)
-    if folder is None or not folder.is_dir():
-        return None
-
-    tracks = [str(p) for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".mp3"]
-    if not tracks:
-        return None
-
-    last_track = _last_track_by_mode.get(mode)
-    if len(tracks) > 1 and last_track in tracks:
-        tracks = [track for track in tracks if track != last_track]
-
-    return random.choice(tracks)
-
-
 def _get_track_candidates(mode: str) -> list[str]:
     folder = MODE_DIRS.get(mode)
     if folder is None or not folder.is_dir():
@@ -67,8 +50,13 @@ def play_music(mode: str) -> bool:
             return False
 
         if pygame.mixer.music.get_busy():
+            # Non-blocking fadeout: start the fade then immediately load the
+            # next track.  pygame replaces the current stream on load(), so
+            # the old audio fades out via the mixer's internal buffer while
+            # the new track is prepared.  Do NOT call pygame.time.wait() here
+            # — that would block the Qt main thread for FADE_MS milliseconds,
+            # freezing repaints, input handling, and signal delivery.
             pygame.mixer.music.fadeout(FADE_MS)
-            pygame.time.wait(FADE_MS)
 
         for track in candidates:
             try:

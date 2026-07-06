@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import ai_messages
 import music
 from engine import ZorbyEngine, AppStatus, MODE_WORK, MODE_ENTERTAINMENT, MODE_GAME
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QObject, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import QApplication
 from stats import FocusStats
 from ui import FloatingOrbWindow
@@ -186,20 +186,64 @@ def _tick(engine: ZorbyEngine, window: FloatingOrbWindow, session: SessionState)
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Engine ↔ Qt bridge (runs on Qt main thread via Qt callbacks)
+# Engine ↔ Qt bridge
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Problem: engine callbacks are invoked on the engine's background thread.
+# Calling Qt widget methods (hide, show, raise_…) directly from that thread
+# is undefined behaviour in PyQt5 and a common source of crashes / visual
+# corruption.
+#
+# Solution: _EngineBridge is a QObject that lives on the main thread.
+# Its pyqtSignals are emitted from the background thread (safe — Qt queues
+# the delivery automatically) and connected to @pyqtSlots that execute on
+# the main thread, where widget access is always valid.
 # ══════════════════════════════════════════════════════════════════════════
 
-def _make_game_enter_handler(window: FloatingOrbWindow):
-    def _on_enter():
-        window.hide()
-    return _on_enter
+class _EngineBridge(QObject):
+    """Thread-safe bridge between ZorbyEngine callbacks and Qt widgets.
 
+    Signals
+    -------
+    game_entered  emitted (from any thread) when a game/fullscreen session starts.
+    game_exited   emitted (from any thread) when a game/fullscreen session ends.
+    """
 
-def _make_game_exit_handler(window: FloatingOrbWindow):
-    def _on_exit():
-        window.show()
-        window.raise_()
-    return _on_exit
+    game_entered = pyqtSignal()   # engine background thread → main thread
+    game_exited  = pyqtSignal()   # engine background thread → main thread
+
+    def __init__(self, window: FloatingOrbWindow, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        # Connect signals to slots once at construction time.
+        # Qt will always deliver these on the main thread (queued connection).
+        self.game_entered.connect(self._on_game_entered)
+        self.game_exited.connect(self._on_game_exited)
+        self._window = window
+
+    # ── Callbacks registered with ZorbyEngine (called on engine thread) ─────
+    # These only emit a signal — the safest possible operation from a non-Qt
+    # thread.  No widget access happens here.
+
+    def emit_game_entered(self) -> None:
+        """Engine calls this on its background thread."""
+        self.game_entered.emit()
+
+    def emit_game_exited(self) -> None:
+        """Engine calls this on its background thread."""
+        self.game_exited.emit()
+
+    # ── Slots executed on the main thread ───────────────────────────────────
+
+    @pyqtSlot()
+    def _on_game_entered(self) -> None:
+        """Hide Zorby while a game / fullscreen app is active."""
+        self._window.hide()
+
+    @pyqtSlot()
+    def _on_game_exited(self) -> None:
+        """Restore Zorby after returning from a game / fullscreen app."""
+        self._window.show()
+        self._window.raise_()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -214,10 +258,13 @@ def main() -> int:
     window  = FloatingOrbWindow()
     session = SessionState()
 
-    # Wire engine callbacks → Qt window visibility
+    # Wire engine callbacks → Qt window visibility via a thread-safe bridge.
+    # The bridge QObject lives on the main thread; its slots are always
+    # invoked on the main thread regardless of which thread emits the signal.
     engine = ZorbyEngine(interval=POLL_SECONDS, auto_pause_media=True)
-    engine.on_game_enter(_make_game_enter_handler(window))
-    engine.on_game_exit(_make_game_exit_handler(window))
+    bridge = _EngineBridge(window)
+    engine.on_game_enter(bridge.emit_game_entered)
+    engine.on_game_exit(bridge.emit_game_exited)
 
     window.show()
     window.raise_()

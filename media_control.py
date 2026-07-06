@@ -10,14 +10,24 @@ Why SendInput instead of keyboard.send()?
   and handles foreground/background apps equally.  The `keyboard` library
   is used as an optional fallback.
 
+Why the toggle-key limitation?
+  Windows exposes only VK_MEDIA_PLAY_PAUSE (0xB3) — a single toggle virtual
+  key.  There is no separate "pause-only" or "play-only" hardware key.
+  Callers that want directed pause/play behaviour (not a raw toggle) must
+  check the current playback state via is_audio_playing() and skip the key
+  press when the system is already in the desired state; otherwise a second
+  call would *resume* media instead of keeping it paused.
+
 Public API
 ----------
-toggle_media()   → bool   Play if paused, pause if playing (most common use)
-pause_media()    → bool   Stop playback (sends play/pause — toggles to pause)
+toggle_media()   → bool   Unconditional play/pause flip (use when intent is a toggle)
+pause_media()    → bool   Stop playback only if audio is currently playing (idempotent)
+play_media()     → bool   Start playback only if audio is currently silent  (idempotent)
 next_track()     → bool   Skip to next track
 prev_track()     → bool   Go back to previous track
 
-All functions return True on success, False if SendInput failed.
+All functions return True on success or "already in desired state",
+False if SendInput failed.
 """
 
 from __future__ import annotations
@@ -25,6 +35,8 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import time
+
+from audio import is_audio_playing
 
 # ---------------------------------------------------------------------------
 # Win32 constants & structures
@@ -119,7 +131,11 @@ def _send_vk_with_fallback(vk: int, keyboard_name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def toggle_media() -> bool:
-    """Send a play/pause toggle to the system media session.
+    """Send a play/pause toggle to the system media session unconditionally.
+
+    Use this when the *intent* is to flip state regardless of current
+    playback status (e.g. a user-facing hotkey).
+    For directed pause or play, prefer pause_media() / play_media() instead.
 
     Works for: Spotify, VLC, YouTube (Chrome/Firefox/Edge via SMTC),
     Windows Media Player, and any app that registers media keys.
@@ -130,17 +146,47 @@ def toggle_media() -> bool:
     return _send_vk_with_fallback(VK_MEDIA_PLAY_PAUSE, "play/pause media")
 
 
-# Alias — semantically more explicit callers can use these.
-# Both send the same VK_MEDIA_PLAY_PAUSE key (toggle); Windows/SMTC
-# figures out the target state from the session's current playback status.
 def pause_media() -> bool:
-    """Pause currently playing media (sends play/pause toggle)."""
-    return toggle_media()
+    """Pause currently playing media — idempotent, no-op if already silent.
+
+    Why the pre-flight check?
+    -------------------------
+    Windows exposes only VK_MEDIA_PLAY_PAUSE — a toggle key with no
+    dedicated "pause-only" counterpart.  Sending it while media is already
+    paused would *resume* playback instead of stopping it.  We therefore
+    check the WASAPI peak meter first and skip the key press when audio is
+    already silent, ensuring this function is safe to call multiple times
+    (e.g. on consecutive ticks, or after the user already paused manually).
+
+    Returns:
+        True  — media is now paused (either we sent the key, or it was
+                already silent).
+        False — SendInput call failed.
+    """
+    if not is_audio_playing():
+        # Already silent / paused — sending the toggle would resume playback.
+        return True   # desired state already achieved; report success
+    return _send_vk_with_fallback(VK_MEDIA_PLAY_PAUSE, "play/pause media")
 
 
 def play_media() -> bool:
-    """Resume paused media (sends play/pause toggle)."""
-    return toggle_media()
+    """Resume paused media — idempotent, no-op if audio is already playing.
+
+    Why the pre-flight check?
+    -------------------------
+    Same toggle-key constraint as pause_media(): sending VK_MEDIA_PLAY_PAUSE
+    while audio is already playing would pause it.  We therefore only send
+    the key when the peak meter confirms audio is currently silent.
+
+    Returns:
+        True  — media is now playing (either we sent the key, or it was
+                already audible).
+        False — SendInput call failed.
+    """
+    if is_audio_playing():
+        # Already playing — sending the toggle would pause it.
+        return True   # desired state already achieved; report success
+    return _send_vk_with_fallback(VK_MEDIA_PLAY_PAUSE, "play/pause media")
 
 
 def next_track() -> bool:

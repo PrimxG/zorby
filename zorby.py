@@ -67,7 +67,7 @@ def main() -> None:
     engine.start()
 
     try:
-        while engine._running:
+        while engine.running:
             time.sleep(0.2)
     except SystemExit:
         pass
